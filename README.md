@@ -2,9 +2,23 @@
 
 ## Краткое описание
 
-**Что делает.** Учебный Telegram-бот — **персональный агент** на **[Haystack](https://haystack.deepset.ai/overview/quick-start)** (`Agent`, tool calling): ответы через **OpenAI-совместимый API** ([ProxyAPI](https://proxyapi.ru/docs/overview)), долговременная память и контекст загруженных документов в **[Weaviate Cloud](https://console.weaviate.cloud/)** через **`weaviate-haystack`** ([`WeaviateDocumentStore`](https://haystack.deepset.ai/integrations/weaviate-document-store)), семантический поиск по эмбеддингам (запросы к API, не локальные модели эмбеддингов). В **Weaviate** сохраняется **только текст сообщений пользователя** (`role=user`) для семантической «памяти»; **чанки загруженных файлов** (PDF, DOCX, DOC) индексируются отдельно с метаданными (`filename`, `chunk_index` и др.). Ответы ассистента в базу не пишутся. Краткий контекст диалога — в памяти процесса. Разбор документов — **[Docling](https://docling-project.github.io/docling/)** через **[docling-haystack](https://haystack.deepset.ai/integrations/docling)** и **Haystack `Pipeline`** (конвертация в Markdown, затем чанкование `DocumentSplitter`). Инструменты: факт о кошках (`catfact.ninja`), случайное фото собаки (`dog.ceo`) + описание через **vision**; фото дублируется в чат через `send_photo` (без повторной отправки старых картинок при повторном запросе).
+В репозитории **два режима** одного стека (Haystack, Weaviate, OpenAI-совместимый API, pyTelegramBotAPI):
 
-**Как запускать.** `cp .env.example .env`, задать `WEAVIATE_URL`, `WEAVIATE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY` (см. `.env.example`). Затем `docker compose up -d --build`. Логи: `docker compose logs -f bot`. Остановка: `docker compose down`.
+| Режим | Модуль | Назначение |
+|--------|--------|------------|
+| **Личный чат** | `vpg_telegram.v2` | Персональный **агент** с tool calling, памятью в Weaviate, загрузкой PDF/DOCX через **Docling**, инструментами (кошки, собака + vision). |
+| **Групповой чат** | `vpg_telegram.group` | Бот для **группы / супергруппы**: **текст сообщений участников** пишется в отдельную коллекцию Weaviate; сессия **`/listen on` … `off`** дополнительно копит транскрипт и по **`/listen off`** даёт **сводку** (тоже в индекс). Ответы по **@упоминанию** или **reply** — **RAG** по контексту чата. Личные документы и агентские tools не используются. |
+
+**Личный бот (v2) подробнее.** Ответы через **OpenAI-совместимый API** ([ProxyAPI](https://proxyapi.ru/docs/overview)), долговременная память и чанки файлов в **[Weaviate Cloud](https://console.weaviate.cloud/)** через **`weaviate-haystack`**. В коллекции для диалога в Weaviate для «памяти» сохраняется **только текст пользователя** (`role=user`); **чанки файлов** — отдельно с метаданными (`filename`, `chunk_index` и др.). Разбор документов — **[Docling](https://docling-project.github.io/docling/)** и **Haystack `Pipeline`**. Инструменты: факт о кошках, случайная собака + **vision**, `send_photo` без дублирования старых URL.
+
+**Групповой бот подробнее.** Задайте **`WEAVIATE_GROUP_COLLECTION_NAME`** (не смешивать с коллекцией личного бота). Добавьте бота в группу; при необходимости отключите **privacy mode** у бота в BotFather, иначе он не увидит обычные сообщения. Команды: **`/listen on`** или **`/listen_on`** — отметить начало сессии (накопление транскрипта для сводки); **`/listen off`** или **`/listen_off`** — остановить и сгенерировать краткую **сводку** сессии; далее вопросы к базе знаний чата — **reply** на сообщение бота или **`@username`** бота в тексте.
+
+**Как запускать (общее).** `cp .env.example .env`, задать `WEAVIATE_URL`, `WEAVIATE_API_KEY`, `OPENAI_API_KEY` и **`TELEGRAM_BOT_TOKEN`** (см. `.env.example`). Какой именно модуль стартует в Docker, задаётся **`command`** в `docker-compose.yml` (сейчас по умолчанию групповой бот). Логи: `docker compose logs -f bot`. Остановка: `docker compose down`.
+
+**Один токен Telegram и два режима.** У **одного** бота BotFather — **один** токен и один процесс long polling: **нельзя** одновременно в одном процессе быть и личным v2, и групповым ботом. Варианты:
+
+1. **Два бота в BotFather** — два `TELEGRAM_BOT_TOKEN`, два контейнера (или два процесса), в одном `command: … vpg_telegram.v2`, в другом `… vpg_telegram.group`; в `.env` удобно завести, например, `TELEGRAM_BOT_TOKEN_PERSONAL` и `TELEGRAM_BOT_TOKEN_GROUP` и пробросить их в `environment` каждого сервиса как `TELEGRAM_BOT_TOKEN` (остальные ключи OpenAI/Weaviate могут быть общими).
+2. **Один бот** — выберите режим: в `docker-compose.yml` смените `command` на нужный модуль **или** запускайте локально по очереди `python -m vpg_telegram.v2` и `python -m vpg_telegram.group` с тем же `.env` (не параллельно).
 
 Исходящие запросы к **Telegram Bot API**, к ProxyAPI и к **Weaviate** идут по **HTTPS**. Входящий HTTP/TLS-сервер приложение **не поднимает** — бот работает через **long polling** ([pyTelegramBotAPI](https://github.com/eternnoir/pyTelegramBotAPI)).
 
@@ -27,7 +41,7 @@ Python **3.12**, **haystack-ai**, **weaviate-haystack**, **weaviate-client** v4,
 | `vpg_telegram/v2/bot/telegram_bot.py` | Telegram: текст, документы, команды |
 | `vpg_telegram/v2/components/`, `pipelines/`, … | Weaviate v2, ингест, ассистент, пайплайны Haystack |
 | `vpg_telegram/v2/config.py` | Опции чанков и `FILE_RAG_TOP_K` поверх `vpg07.config` |
-| `vpg_telegram/group/` | Групповой бот: Weaviate, RAG, `/listen` *(модуль `vpg_telegram.group`; в `docker-compose` command по умолчанию смотрите актуальное значение)* |
+| `vpg_telegram/group/` | Групповой бот: индексация сообщений в Weaviate, `/listen`, RAG по @mention/reply *(модуль `vpg_telegram.group`)* |
 | `main.py` | Запуск v1 без модуля загрузки файлов через Docling |
 | `.env.example` | Переменные окружения |
 | `requirements.txt` | Зависимости приложения (без pytest) |
@@ -41,13 +55,16 @@ Python **3.12**, **haystack-ai**, **weaviate-haystack**, **weaviate-client** v4,
 
 ```bash
 cp .env.example .env
-# WEAVIATE_URL, WEAVIATE_API_KEY, TELEGRAM_BOT_TOKEN, OPENAI_API_KEY
+# WEAVIATE_URL, WEAVIATE_API_KEY, OPENAI_API_KEY; для группы — WEAVIATE_GROUP_COLLECTION_NAME
+# TELEGRAM_BOT_TOKEN — см. раздел про один/два токена выше
 
 docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Контейнер: `python -m vpg_telegram.v2` или `python -m vpg_telegram.group` (в образе `PYTHONPATH=/app/src:/app`).
+В `docker-compose.yml` поле **`command`** задаёт модуль: например `python -m vpg_telegram.group` (группа) или `python -m vpg_telegram.v2` (личный). В образе `PYTHONPATH=/app/src:/app`.
+
+**Два бота одновременно в Compose.** Дублируйте сервис (два блока `build` с тем же `dockerfile`), разные имена контейнеров, в одном `command` — `vpg_telegram.v2`, в другом — `vpg_telegram.group`, и задайте **разные** значения `TELEGRAM_BOT_TOKEN` через `environment` (из двух переменных в `.env`). Weaviate и OpenAI в обоих сервисах могут ссылаться на один и тот же `env_file`.
 
 ### Локально
 
@@ -58,7 +75,9 @@ cp .env.example .env
 PYTHONPATH=src:. python -m vpg_telegram.v2
 ```
 
-Вариант **без** загрузки файлов (логика как отдельный минимальный бот): `PYTHONPATH=src python main.py`.
+Групповой бот (тот же `.env`, другой токен — если используете отдельного бота): `PYTHONPATH=src:. python -m vpg_telegram.group`.
+
+Вариант **без** загрузки файлов (логика как отдельный минимальный бот v1): `PYTHONPATH=src python main.py`.
 
 ### Тесты (без Telegram)
 
@@ -69,12 +88,24 @@ PYTHONPATH=src:. pytest
 
 ## Команды бота
 
+### Личный бот (`vpg_telegram.v2`)
+
 | Команда / ввод | Действие |
 |----------------|----------|
 | `/start` | Приветствие и описание возможностей |
 | `/help` | Справка |
 | Текст (не команда) | Агент + память Weaviate + фрагменты загруженных документов + инструменты по необходимости |
 | Документ PDF / DOCX / DOC | Разбор Docling, чанки в Weaviate, краткое резюме, далее — вопросы по содержимому |
+
+### Групповой бот (`vpg_telegram.group`)
+
+| Команда / ввод | Действие |
+|----------------|----------|
+| `/start`, `/help` | Краткая справка (в группе и в личке с ботом) |
+| `/listen on` или `/listen_on` | Начать сессию «слушаю»: **накопление транскрипта** для **сводки** при `/listen off` *(запись реплик в Weaviate идёт и вне сессии)* |
+| `/listen off` или `/listen_off` | Остановить сессию, краткая **сводка** по накопленному контексту |
+| Reply на сообщение бота **или** текст с `@bot` | Вопрос: **RAG** по проиндексированным сообщениям чата и ответ |
+| Любое обычное текстовое сообщение в группе | **Индексация** в Weaviate (кроме самого бота и строк, начинающихся с `/`); сессия `/listen` дополнительно копит транскрипт для **сводки** при `/listen off` |
 
 ## Путь запроса: пример vision-инструмента (случайная собака)
 
@@ -120,8 +151,13 @@ sequenceDiagram
 | `EMBEDDING_DIMENSION` | нет | Размерность векторов (**1536** для `text-embedding-3-small`) |
 | `WEAVIATE_URL` | да | Endpoint кластера Weaviate Cloud |
 | `WEAVIATE_API_KEY` | да | API key Weaviate |
-| `WEAVIATE_COLLECTION_NAME` | нет | Имя коллекции (по умолчанию `Vpg07HaystackMemory`; для режима с файлами — отдельное имя, см. комментарии в `.env.example`) |
-| `TELEGRAM_BOT_TOKEN` | да | Токен от [@BotFather](https://t.me/BotFather) |
+| `WEAVIATE_COLLECTION_NAME` | нет | Имя коллекции (по умолчанию `Vpg07HaystackMemory`; для v2 с файлами — отдельное имя, см. `.env.example`) |
+| `WEAVIATE_GROUP_COLLECTION_NAME` | нет | Коллекция **только для группового бота** (по умолчанию `Vpg07GroupChat`); не смешивать с v1/v2 |
+| `GROUP_RAG_TOP_K` | нет | Сколько фрагментов в контекст RAG (группа) |
+| `GROUP_SESSION_MAX_CHARS` | нет | Лимит символов транскрипта сессии «слушаю» |
+| `GROUP_MENTION_MAX_TOKENS` | нет | Лимит токенов ответа при @mention / reply |
+| `GROUP_SESSION_SUMMARY_MAX_TOKENS` | нет | Лимит токенов сводки по `/listen off` |
+| `TELEGRAM_BOT_TOKEN` | да | Токен от [@BotFather](https://t.me/BotFather); для двух режимов параллельно — второй бот и второй токен во втором процессе |
 | `MEMORY_TOP_K` | нет | Сколько фрагментов памяти (сообщения пользователя) в системный промпт |
 | `FILE_RAG_TOP_K` | нет | Сколько чанков загруженных документов в промпт |
 | `DOC_CHUNK_WORDS` | нет | Длина чанка (слова) после Docling |
