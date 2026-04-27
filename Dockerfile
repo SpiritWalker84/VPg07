@@ -24,5 +24,5 @@ RUN pip install --upgrade pip && \
 
 COPY . .
 
-# По умолчанию как в compose — v2; переопределение: docker run ... python main.py
-CMD ["python", "hay_v2_bot/main.py"]
+# По умолчанию как в compose — v2; переопределение: docker run ... python -m vpg_telegram.group
+CMD ["python", "-m", "vpg_telegram.v2"]

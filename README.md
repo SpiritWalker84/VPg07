@@ -22,11 +22,12 @@ Python **3.12**, **haystack-ai**, **weaviate-haystack**, **weaviate-client** v4,
 | `src/vpg07/haystack_assistant.py` | Weaviate (Haystack), эмбеддинги, Agent, память — **точка входа v1** |
 | `src/vpg07/tools_external.py` | Инструменты: `fetch_random_cat_fact`, `describe_random_dog_from_photo` (+ константы `TOOL_NAME_*`) |
 | `src/vpg07/bot.py` | Telegram-бот v1 (long polling), `main.py` |
-| `hay_v2_bot/main.py` | Точка входа **основного** бота (Compose и Dockerfile по умолчанию) |
-| `hay_v2_bot/bot/telegram_bot.py` | Telegram: текст, документы, команды |
-| `hay_v2_bot/components/` | Weaviate-схема v2, ингест файлов, ассистент, резюме |
-| `hay_v2_bot/pipelines/` | Пайплайны Haystack: Docling + сплиттер; эмбеддинги + `DocumentWriter` |
-| `hay_v2_bot/config.py` | Опции чанков и `FILE_RAG_TOP_K` поверх `vpg07.config` |
+| `vpg_telegram/v2/` | Личный бот: Docling, файлы, Weaviate, инструменты (модуль `vpg_telegram.v2`) |
+| `vpg_telegram/v2/main.py` | Точка входа v2: `python -m vpg_telegram.v2` *(Dockerfile по умолчанию)* |
+| `vpg_telegram/v2/bot/telegram_bot.py` | Telegram: текст, документы, команды |
+| `vpg_telegram/v2/components/`, `pipelines/`, … | Weaviate v2, ингест, ассистент, пайплайны Haystack |
+| `vpg_telegram/v2/config.py` | Опции чанков и `FILE_RAG_TOP_K` поверх `vpg07.config` |
+| `vpg_telegram/group/` | Групповой бот: Weaviate, RAG, `/listen` *(модуль `vpg_telegram.group`; в `docker-compose` command по умолчанию смотрите актуальное значение)* |
 | `main.py` | Запуск v1 без модуля загрузки файлов через Docling |
 | `.env.example` | Переменные окружения |
 | `requirements.txt` | Зависимости приложения (без pytest) |
@@ -46,7 +47,7 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Контейнер: `python hay_v2_bot/main.py` (в образе `PYTHONPATH=/app/src:/app`).
+Контейнер: `python -m vpg_telegram.v2` или `python -m vpg_telegram.group` (в образе `PYTHONPATH=/app/src:/app`).
 
 ### Локально
 
@@ -54,7 +55,7 @@ docker compose logs -f bot
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-PYTHONPATH=src:. python hay_v2_bot/main.py
+PYTHONPATH=src:. python -m vpg_telegram.v2
 ```
 
 Вариант **без** загрузки файлов (логика как отдельный минимальный бот): `PYTHONPATH=src python main.py`.
@@ -63,7 +64,7 @@ PYTHONPATH=src:. python hay_v2_bot/main.py
 
 ```bash
 pip install -r requirements-dev.txt
-PYTHONPATH=src pytest
+PYTHONPATH=src:. pytest
 ```
 
 ## Команды бота
@@ -80,7 +81,7 @@ PYTHONPATH=src pytest
 Ниже тот же сценарий, что в коде: от реплики пользователя до `send_photo` в Telegram. Имя инструмента в API — `describe_random_dog_from_photo` (в модуле зафиксировано как `TOOL_NAME_DESCRIBE_RANDOM_DOG_VISION`).
 
 1. Пользователь пишет в чат, например: «покажи случайную собаку и опиши породу».
-2. `on_text` → `HaystackV2Assistant.reply`: семантический поиск по Weaviate (память пользователя и чанки файлов), сбор системного промпта (там перечислены имена инструментов, см. `hay_v2_bot/components/assistant.py`), история сессии.
+2. `on_text` → `HaystackV2Assistant.reply`: семантический поиск по Weaviate (память пользователя и чанки файлов), сбор системного промпта (там перечислены имена инструментов, см. `vpg_telegram/v2/components/assistant.py`), история сессии.
 3. `Agent.run` (Haystack) → модель решает вызвать tool **`describe_random_dog_from_photo`**.
 4. Реализация в `tools_external.build_external_tools` → `describe_random_dog_from_photo`: HTTP к dog.ceo, затем OpenAI **vision** по URL картинки; первая строка результата `DOG_IMAGE_URL:…` нужна боту.
 5. `reply` собирает `AssistantReply`: URL извлекаются из tool-сообщений текущего хода, текст ответа очищается от дублирования ссылки.

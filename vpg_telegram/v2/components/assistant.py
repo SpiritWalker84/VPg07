@@ -1,27 +1,21 @@
-"""Агент v2: память пользователя + RAG по загруженным файлам, те же инструменты что в v1."""
+"""Агент v2: ответы (генерация) и склейка RAG-контекста (Weaviate) с диалогом."""
 
 from __future__ import annotations
 
-import logging
-import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
-from haystack import Document
 from haystack.components.agents import Agent
-from haystack.components.embedders import OpenAIDocumentEmbedder, OpenAITextEmbedder
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.dataclasses import ChatMessage
-from haystack.document_stores.types import DuplicatePolicy
 from haystack.utils import Secret
-from haystack_integrations.components.retrievers.weaviate import WeaviateEmbeddingRetriever
 
-from hay_v2_bot.config import V2Options
-from hay_v2_bot.components.file_ingestion import FileIngestionService, SOURCE_FILE_CHUNK
-from hay_v2_bot.components.weaviate_setup import build_document_store
-from hay_v2_bot.pipelines.index_pipeline import build_index_pipeline
-from hay_v2_bot.pipelines.parse_pipeline import build_parse_pipeline
+from vpg_telegram.v2.config import V2Options
+from vpg_telegram.v2.components.file_ingestion import FileIngestionService
+from vpg_telegram.v2.components.weaviate_setup import build_document_store
+from vpg_telegram.v2.pipelines.index_pipeline import build_index_pipeline
+from vpg_telegram.v2.pipelines.parse_pipeline import build_parse_pipeline
+from vpg_telegram.v2.retrieval import WeaviateContextService, format_file_hits_for_prompt
 from vpg07.config import Settings
 from vpg07.haystack_assistant import (
     AssistantReply,
@@ -36,41 +30,17 @@ from vpg07.tools_external import (
     build_external_tools,
 )
 
-logger = logging.getLogger(__name__)
-
-
-def _format_file_hits(documents: list[Document]) -> str:
-    if not documents:
-        return "Фрагментов из загруженных файлов по этому запросу не найдено."
-    lines: list[str] = []
-    for doc in documents:
-        score = doc.score
-        score_s = f"{score:.3f}" if isinstance(score, float) else "n/a"
-        meta = doc.meta or {}
-        fn = (meta.get("filename") or "").strip()
-        idx = meta.get("chunk_index")
-        label_parts: list[str] = []
-        if fn:
-            label_parts.append(fn)
-        if idx is not None:
-            label_parts.append(f"чанк {idx}")
-        prefix = ("[" + " · ".join(label_parts) + "] ") if label_parts else ""
-        text = (doc.content or "").strip()
-        if text:
-            lines.append(f"- ({score_s}) {prefix}{text}")
-    return "\n".join(lines) if lines else "Файлы проиндексированы, но текст фрагментов пуст."
-
 
 @dataclass(frozen=True)
 class IngestResult:
-    """Результат загрузки файла в Weaviate."""
+    """Результат загрузки файла: число чанков и краткое резюме."""
 
     chunks: int
     summary: str
 
 
 class HaystackV2Assistant:
-    """Персональный агент: долговременная память (как в v1) + контекст из Docling-чанков."""
+    """Персональный агент: долговременная память + RAG по чанкам загруженных файлов."""
 
     def __init__(self, settings: Settings, options: V2Options) -> None:
         self._settings = settings
@@ -78,27 +48,10 @@ class HaystackV2Assistant:
         self._histories: dict[int, list[ChatMessage]] = defaultdict(list)
 
         self._document_store = build_document_store(settings)
-
-        api_key_secret = Secret.from_token(settings.openai_api_key)
-        base = settings.openai_api_base or None
-
-        self._text_embedder = OpenAITextEmbedder(
-            api_key=api_key_secret,
-            model=settings.openai_embedding_model,
-            api_base_url=base,
-            dimensions=settings.embedding_dimension,
-        )
-        self._doc_embedder = OpenAIDocumentEmbedder(
-            api_key=api_key_secret,
-            model=settings.openai_embedding_model,
-            api_base_url=base,
-            dimensions=settings.embedding_dimension,
-        )
-
-        self._retriever = WeaviateEmbeddingRetriever(
+        self._vctx = WeaviateContextService(
+            settings=settings,
+            options=options,
             document_store=self._document_store,
-            top_k=max(settings.memory_top_k, options.document_top_k),
-            filters={},
         )
 
         parse_pipe = build_parse_pipeline(
@@ -113,6 +66,8 @@ class HaystackV2Assistant:
             index_pipeline=index_pipe,
         )
 
+        api_key_secret = Secret.from_token(settings.openai_api_key)
+        base = settings.openai_api_base or None
         tools = build_external_tools(
             openai_api_key=settings.openai_api_key,
             openai_base_url=settings.openai_api_base,
@@ -143,55 +98,6 @@ class HaystackV2Assistant:
     def ingest_file(self, *, user_id: int, path: str, filename: str) -> IngestResult:
         n, summary = self._ingestion.ingest_path(path=path, user_id=user_id, filename=filename)
         return IngestResult(chunks=n, summary=summary)
-
-    def _memory_filter(self, user_id: int) -> dict:
-        return {
-            "operator": "AND",
-            "conditions": [
-                {"field": "user_id", "operator": "==", "value": int(user_id)},
-                {"field": "role", "operator": "==", "value": "user"},
-            ],
-        }
-
-    def _file_filter(self, user_id: int) -> dict:
-        return {
-            "operator": "AND",
-            "conditions": [
-                {"field": "user_id", "operator": "==", "value": int(user_id)},
-                {"field": "source_kind", "operator": "==", "value": SOURCE_FILE_CHUNK},
-            ],
-        }
-
-    def _retrieve_memory(self, *, user_id: int, query_text: str) -> list[Document]:
-        emb = self._text_embedder.run(text=query_text)["embedding"]
-        out = self._retriever.run(
-            query_embedding=emb,
-            filters=self._memory_filter(user_id),
-            top_k=self._settings.memory_top_k,
-        )
-        return list(out.get("documents") or [])
-
-    def _retrieve_files(self, *, user_id: int, query_text: str) -> list[Document]:
-        emb = self._text_embedder.run(text=query_text)["embedding"]
-        out = self._retriever.run(
-            query_embedding=emb,
-            filters=self._file_filter(user_id),
-            top_k=self._options.document_top_k,
-        )
-        return list(out.get("documents") or [])
-
-    def _persist_user_message(self, *, user_id: int, user_text: str) -> None:
-        ts = datetime.now(timezone.utc).isoformat()
-        docs = [
-            Document(
-                id=str(uuid.uuid4()),
-                content=user_text.strip(),
-                meta={"user_id": int(user_id), "role": "user", "chat_ts": ts},
-            ),
-        ]
-        with_embeddings = self._doc_embedder.run(documents=docs)["documents"]
-        n = self._document_store.write_documents(with_embeddings, policy=DuplicatePolicy.NONE)
-        logger.info("Weaviate memory write (user only): %s documents", n)
 
     def _trim_history(self, user_id: int) -> None:
         max_m = self._settings.chat_history_max_messages
@@ -227,10 +133,10 @@ class HaystackV2Assistant:
         )
 
     def reply(self, *, user_id: int, user_text: str, display_name: str) -> AssistantReply:
-        memory_docs = self._retrieve_memory(user_id=user_id, query_text=user_text)
-        file_docs = self._retrieve_files(user_id=user_id, query_text=user_text)
+        memory_docs = self._vctx.retrieve_memory(user_id=user_id, query_text=user_text)
+        file_docs = self._vctx.retrieve_file_chunks(user_id=user_id, query_text=user_text)
         memory_block = _format_memory_block(memory_docs)
-        file_block = _format_file_hits(file_docs)
+        file_block = format_file_hits_for_prompt(file_docs)
         system_prompt = self._build_system_prompt(
             memory_block=memory_block,
             file_block=file_block,
@@ -253,5 +159,5 @@ class HaystackV2Assistant:
         if not assistant_text and not photo_urls:
             assistant_text = "Не удалось сформулировать ответ."
 
-        self._persist_user_message(user_id=user_id, user_text=user_text)
+        self._vctx.persist_user_message(user_id=user_id, user_text=user_text)
         return AssistantReply(text=assistant_text, photo_urls=photo_urls)

@@ -5,8 +5,8 @@ services:
       dockerfile: Dockerfile
     container_name: vpg07-bot
     restart: unless-stopped
-    # Один процесс на токен: по умолчанию v2 (Docling + пайплайны + Weaviate). Старая версия: command: ["python", "main.py"]
-    command: ["python", "hay_v2_bot/main.py"]
+    # Один токен = один процесс: v2 — `python -m vpg_telegram.v2`; группа — `python -m vpg_telegram.group`
+    command: ["python", "-m", "vpg_telegram.group"]
     env_file:
       - path: .env
         required: false

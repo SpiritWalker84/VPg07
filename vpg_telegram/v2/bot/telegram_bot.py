@@ -8,8 +8,8 @@ from pathlib import Path
 
 import telebot
 
-from hay_v2_bot.components.assistant import HaystackV2Assistant
-from hay_v2_bot.config import V2Options, load_v2_options
+from vpg_telegram.v2.components.assistant import HaystackV2Assistant
+from vpg_telegram.v2.config import V2Options, load_v2_options
 from vpg07.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -113,13 +113,21 @@ class HaystackV2TelegramBot:
                     tmp_path = tmp.name
 
                 result = self._assistant.ingest_file(user_id=user_id, path=tmp_path, filename=filename)
-                self._bot.reply_to(
-                    message,
-                    "Готово. Я изучил этот файл, теперь можем его обсудить.",
-                )
                 summary = (result.summary or "").strip()
                 if summary:
-                    self._bot.reply_to(message, summary)
+                    body = (
+                        f"Готово. Сохранено фрагментов: {result.chunks}.\n\n"
+                        f"Краткое резюме:\n{summary}\n\n"
+                        "Можете задавать вопросы по содержимому."
+                    )
+                else:
+                    body = (
+                        f"Готово. Сохранено фрагментов: {result.chunks}.\n"
+                        "Краткое резюме сформировать не удалось; вопросы по тексту всё равно можно задавать."
+                    )
+                for part in _chunk_text(body):
+                    if part.strip():
+                        self._bot.reply_to(message, part)
             except Exception:
                 logger.exception("document ingest failed")
                 self._bot.reply_to(
